@@ -168,7 +168,11 @@
 <section id="host" class="view">
   <div class="top">
     <h1><span class="zap"></span> Hunt the <span class="brand">Hazards</span> · Host</h1>
-    <button class="btn small" style="background:#fff" onclick="location.reload()">Exit</button>
+    <div class="row" style="gap:8px">
+      <button class="btn small" id="musicBtn" style="background:#F5A623" onclick="toggleMusic()">▶ Music</button>
+      <label class="btn small" style="background:#fff;cursor:pointer" title="Play your own MP3 instead of the built-in loop">Own track<input type="file" id="ownTrack" accept="audio/*" style="display:none" onchange="loadOwnTrack(this)"></label>
+      <button class="btn small" style="background:#fff" onclick="location.reload()">Exit</button>
+    </div>
   </div>
   <div class="wrap">
     <div class="tabs">
@@ -388,6 +392,49 @@ function renderBoard(tbl,rows,me){
 }
 function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
+
+/* ---------- Host music (built-in synth loop, or the host's own MP3) ---------- */
+let audioCtx=null, musicOn=false, seqTimer=null, ownAudio=null, masterGain=null;
+const BPM=124, BEAT=60/BPM;
+// simple upbeat lobby loop: bass, stabs, hats
+const BASS=[36,36,43,36, 41,41,48,41, 38,38,45,38, 43,43,50,43]; // MIDI notes, 16 x 8th notes
+const CHORDS=[[60,64,67],[60,64,67],[65,69,72],[65,69,72],[62,65,69],[62,65,69],[67,71,74],[67,71,74]];
+const mtof=m=>440*Math.pow(2,(m-69)/12);
+function ensureCtx(){ if(!audioCtx){ audioCtx=new (window.AudioContext||window.webkitAudioContext)(); masterGain=audioCtx.createGain(); masterGain.gain.value=0.35; masterGain.connect(audioCtx.destination);} if(audioCtx.state==='suspended') audioCtx.resume(); }
+function tone(freq,t,dur,type,vol,attack){ const o=audioCtx.createOscillator(), g=audioCtx.createGain(); o.type=type; o.frequency.value=freq; g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(vol,t+(attack||0.01)); g.gain.exponentialRampToValueAtTime(0.001,t+dur); o.connect(g); g.connect(masterGain); o.start(t); o.stop(t+dur+0.05); }
+function hat(t,vol){ const b=audioCtx.createBuffer(1,audioCtx.sampleRate*0.05,audioCtx.sampleRate); const d=b.getChannelData(0); for(let i=0;i<d.length;i++) d[i]=(Math.random()*2-1)*Math.pow(1-i/d.length,3); const s=audioCtx.createBufferSource(); s.buffer=b; const f=audioCtx.createBiquadFilter(); f.type='highpass'; f.frequency.value=7000; const g=audioCtx.createGain(); g.gain.value=vol; s.connect(f); f.connect(g); g.connect(masterGain); s.start(t); }
+function kick(t){ const o=audioCtx.createOscillator(), g=audioCtx.createGain(); o.frequency.setValueAtTime(150,t); o.frequency.exponentialRampToValueAtTime(45,t+0.12); g.gain.setValueAtTime(0.9,t); g.gain.exponentialRampToValueAtTime(0.001,t+0.25); o.connect(g); g.connect(masterGain); o.start(t); o.stop(t+0.3); }
+let nextBar=0, step=0;
+function schedule(){
+  const lookahead=0.6; const eighth=BEAT/2;
+  while(nextBar<audioCtx.currentTime+lookahead){
+    const t=nextBar; const i=step%16;
+    tone(mtof(BASS[i]),t,eighth*0.9,'sawtooth',0.18);
+    if(i%2===0) kick(t);
+    hat(t+eighth/2,0.12); if(i%2===1) hat(t,0.06);
+    if(i%2===0){ const ch=CHORDS[(i/2)%8]; ch.forEach(n=>tone(mtof(n),t,eighth*0.6,'square',0.05,0.02)); }
+    nextBar+=eighth; step++;
+  }
+}
+function toggleMusic(){
+  const b=$('musicBtn');
+  if(musicOn){ stopMusic(); return; }
+  musicOn=true; b.textContent='⏸ Music';
+  if(ownAudio){ ownAudio.play().catch(()=>{}); return; }
+  ensureCtx(); nextBar=audioCtx.currentTime+0.05; step=0; schedule(); seqTimer=setInterval(schedule,200);
+}
+function stopMusic(){ musicOn=false; $('musicBtn').textContent='▶ Music'; clearInterval(seqTimer); seqTimer=null; if(ownAudio) ownAudio.pause(); if(audioCtx&&!ownAudio) audioCtx.suspend(); }
+function loadOwnTrack(inp){
+  const f=inp.files&&inp.files[0]; if(!f) return;
+  const wasOn=musicOn; if(musicOn) stopMusic();
+  if(ownAudio){ ownAudio.pause(); URL.revokeObjectURL(ownAudio.src); }
+  ownAudio=new Audio(URL.createObjectURL(f)); ownAudio.loop=true; ownAudio.volume=0.6;
+  toast('Loaded: '+f.name,'good'); if(wasOn) toggleMusic();
+}
+function ding(){ // short chime when a new score lands
+  if(!audioCtx||!musicOn) return; const t=audioCtx.currentTime; tone(880,t,0.25,'sine',0.25); tone(1320,t+0.08,0.3,'sine',0.2);
+}
+
 /* ---------- Host ---------- */
 let poll=null;
 function openHost(){
@@ -407,7 +454,8 @@ function openHost(){
     $('mTag').textContent='Recap'; $('mTitle').textContent=h.title; $('mWhy').textContent=h.why; $('mDo').textContent=h.do; $('modal').classList.add('show'); });
   renderRecap($('recapHost'));
   loadBoard(); clearInterval(poll);
-  if(!watchBoard(rows=>{ renderBoard($('lbHost'),rows,null); $('playerCt').textContent = rows.length?`· ${rows.length} played`:''; })) poll=setInterval(loadBoard,5000);
+  let lastCount=-1;
+  if(!watchBoard(rows=>{ if(lastCount>=0&&rows.length>lastCount) ding(); lastCount=rows.length; renderBoard($('lbHost'),rows,null); $('playerCt').textContent = rows.length?`· ${rows.length} played`:''; })) poll=setInterval(loadBoard,5000);
 }
 async function loadBoard(){ const rows=await getBoard(); renderBoard($('lbHost'),rows,null); $('playerCt').textContent = rows.length?`· ${rows.length} played`:''; }
 function tab(name,btn){ document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('on')); btn.classList.add('on'); document.querySelectorAll('.pane').forEach(p=>p.classList.remove('on')); $('pane-'+name).classList.add('on'); }
